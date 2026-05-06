@@ -7,6 +7,35 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, get, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // ============================================================
+  // 🔥 CONFIGURACIÓN DE FIREBASE
+  // Reemplaza estos valores con los de TU proyecto en Firebase
+  // (ver instrucciones al final del archivo)
+  // ============================================================
+  const firebaseConfig = {
+  apiKey: "AIzaSyCwgO2EbEVYWxT2x-Fyv4l6X9JCYDCwa6o",
+  authDomain: "finduo-pareja.firebaseapp.com",
+  databaseURL: "https://finduo-pareja-default-rtdb.firebaseio.com",
+  projectId: "finduo-pareja",
+  storageBucket: "finduo-pareja.firebasestorage.app",
+  messagingSenderId: "540580158414",
+  appId: "1:540580158414:web:9a5958a8a38fba18b1299f",
+  measurementId: "G-XBVP66Q0X1"
+};
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Exponer funciones de Firebase al scope global para que el resto del JS las use
+  window._fb = { db, ref, set, get, onValue };
+  window._fbReady = true;
+  document.dispatchEvent(new Event('firebase-ready'));
+</script>
 <style>
 /* ============================================================
    VARIABLES & RESET
@@ -1527,7 +1556,31 @@ let state = {
   snapshots: {}
 };
 
-function loadData() {
+// ============================================================
+// FIREBASE: Guardar y cargar datos en la nube compartida
+// ============================================================
+const FB_PATH = 'finduo'; // Carpeta raíz en tu base de datos Firebase
+
+async function saveData() {
+  // Guardar también en localStorage como respaldo offline
+  localStorage.setItem(STORAGE_KEYS.data, JSON.stringify(state.transactions));
+  localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
+  localStorage.setItem(STORAGE_KEYS.snapshots, JSON.stringify(state.snapshots));
+
+  // Guardar en Firebase (nube compartida)
+  if (!window._fbReady) return;
+  try {
+    const { db, ref, set } = window._fb;
+    await set(ref(db, FB_PATH + '/transactions'), state.transactions);
+    await set(ref(db, FB_PATH + '/settings'), state.settings);
+    await set(ref(db, FB_PATH + '/snapshots'), state.snapshots);
+  } catch(e) {
+    console.warn('Error guardando en Firebase, usando localStorage:', e);
+  }
+}
+
+async function loadData() {
+  // Cargar primero desde localStorage (respaldo rápido)
   try {
     const d = localStorage.getItem(STORAGE_KEYS.data);
     if (d) state.transactions = JSON.parse(d);
@@ -1535,13 +1588,47 @@ function loadData() {
     if (s) state.settings = { ...state.settings, ...JSON.parse(s) };
     const snaps = localStorage.getItem(STORAGE_KEYS.snapshots);
     if (snaps) state.snapshots = JSON.parse(snaps);
-  } catch(e) { console.warn('Error loading data', e); }
+  } catch(e) { console.warn('Error cargando localStorage', e); }
+
+  // Luego intentar cargar desde Firebase (datos compartidos, más recientes)
+  if (!window._fbReady) return;
+  try {
+    const { db, ref, get } = window._fb;
+    const snap = await get(ref(db, FB_PATH));
+    if (snap.exists()) {
+      const data = snap.val();
+      if (data.transactions) state.transactions = Object.values(data.transactions).filter(Boolean);
+      if (data.settings) state.settings = { ...state.settings, ...data.settings };
+      if (data.snapshots) state.snapshots = data.snapshots;
+      // Actualizar localStorage con los datos de la nube
+      localStorage.setItem(STORAGE_KEYS.data, JSON.stringify(state.transactions));
+      localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
+      localStorage.setItem(STORAGE_KEYS.snapshots, JSON.stringify(state.snapshots));
+    }
+    // Mostrar indicador de sincronización
+    showSyncBadge('✅ Sincronizado con la nube');
+  } catch(e) {
+    console.warn('Firebase no disponible, usando datos locales:', e);
+    showSyncBadge('⚠️ Modo sin conexión');
+  }
 }
 
-function saveData() {
-  localStorage.setItem(STORAGE_KEYS.data, JSON.stringify(state.transactions));
-  localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(state.settings));
-  localStorage.setItem(STORAGE_KEYS.snapshots, JSON.stringify(state.snapshots));
+function showSyncBadge(msg) {
+  let badge = document.getElementById('sync-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'sync-badge';
+    badge.style.cssText = `
+      position:fixed; bottom:80px; right:20px; z-index:9999;
+      background:rgba(19,16,28,0.95); border:1px solid rgba(255,142,196,0.2);
+      color:#9b8aad; font-size:11px; padding:6px 12px; border-radius:20px;
+      backdrop-filter:blur(10px); transition:opacity 0.5s;
+    `;
+    document.body.appendChild(badge);
+  }
+  badge.textContent = msg;
+  badge.style.opacity = '1';
+  setTimeout(() => { badge.style.opacity = '0'; }, 3000);
 }
 
 /* ============================================================
@@ -2440,9 +2527,11 @@ function renderInvoiceHistory() {
    EVENT LISTENERS
    ============================================================ */
 document.addEventListener('DOMContentLoaded', () => {
-  loadData();
-  checkMonthRollover();
-  updateSidebarNames();
+  // Esperar a que Firebase esté listo antes de cargar datos
+  const initApp = async () => {
+    await loadData();
+    checkMonthRollover();
+    updateSidebarNames();
 
   // Set current month on filter
   document.getElementById('month-filter').value = currentMonth();
@@ -2539,6 +2628,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initial render
   renderDashboard();
+  }; // fin initApp
+
+  // Ejecutar la app: si Firebase ya está listo, arrancar; si no, esperar
+  if (window._fbReady) {
+    initApp();
+  } else {
+    document.addEventListener('firebase-ready', initApp);
+    // Por si Firebase tarda más de 3 segundos, arrancar igual con localStorage
+    setTimeout(() => { if (!window._fbReady) initApp(); }, 3000);
+  }
 });
 </script>
 </body>
